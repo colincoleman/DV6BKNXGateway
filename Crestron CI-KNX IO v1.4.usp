@@ -1,0 +1,937 @@
+/*******************************************************************************************
+  SIMPL+ Module Information
+  (Fill in comments below)
+*******************************************************************************************/
+/*
+Dealer Name:
+System Name:
+System Number:
+Programmer: Christophe Hombrouck
+Comments:
+*/
+
+/*******************************************************************************************
+  Compiler Directives
+  (Uncomment and declare compiler directives as needed)
+*******************************************************************************************/
+// #ENABLE_DYNAMIC
+// #SYMBOL_NAME ""
+// #HINT ""
+#DEFINE_CONSTANT MAXOBJECTS			250
+//#CATEGORY "0" //Invisible
+// #DEFAULT_VOLATILE
+// #PRINT_TO_TRACE                                                  
+// #DIGITAL_EXPAND 
+// #ANALOG_SERIAL_EXPAND 
+// #OUTPUT_SHIFT                                      
+// #HELP_PDF_FILE ""
+#DEFAULT_VOLATILE
+#ENABLE_STACK_CHECKING
+#ENABLE_TRACE
+
+/*******************************************************************************************
+  DIGITAL, ANALOG and SERIAL INPUTS and OUTPUTS
+  (Uncomment and declare inputs and outputs as needed)
+*******************************************************************************************/
+DIGITAL_INPUT Update_Data_Points_Values,Update_Data_Points_Values_From_Bus,Startup_Gateway;
+DIGITAL_INPUT Poll_Object[MAXOBJECTS],Poll_Object_From_Bus[MAXOBJECTS];
+BUFFER_INPUT Rx$[10000];
+STRING_INPUT Command$[190];
+
+ 
+STRING_OUTPUT Tx$;
+STRING_OUTPUT Feedback$[MAXOBJECTS];
+
+ /*******************************************************************************************
+  Parameters
+  (Uncomment and declare parameters as needed)
+*******************************************************************************************/
+INTEGER_PARAMETER Object_ID$[MAXOBJECTS];
+// SIGNED_INTEGER_PARAMETER
+// LONG_INTEGER_PARAMETER
+// SIGNED_LONG_INTEGER_PARAMETER
+// STRING_PARAMETER
+
+/*******************************************************************************************
+  Parameter Properties
+  (Uncomment and declare parameter properties as needed)
+*******************************************************************************************/
+/*
+#BEGIN_PARAMETER_PROPERTIES parameter_variable, parameter_variable, ...
+   // propValidUnits = // unitString or unitDecimal|unitHex|unitPercent|unitCharacter|unitTime|unitTicks;
+   // propDefaultUnit = // unitString, unitDecimal, unitHex, unitPercent, unitCharacter, unitTime or unitTicks;
+   // propBounds = lower_bound , upper_bound;
+   // propDefaultValue = ;  // or, propDefaultValue = "";
+   // propList = // { "value" , "label" } , { "value" , "label" } , ... ;
+   // propShortDescription = "status_bar_hint_text";
+   // #BEGIN_PROP_FULL_DESCRIPTION  line_1...  line_2...  line_n  #END_PROP_FULL_DESCRIPTION
+   // #BEGIN_PROP_NOTES line_1...  line_2...  line_n  #END_PROP_NOTES
+#END_PARAMETER_PROPERTIES
+*/
+
+
+/*******************************************************************************************
+  Global Variables
+  (Uncomment and declare global variables as needed)
+  Note:  Be sure to initialize all declared STRING variables as needed
+         For example, in Function Main: myString = "";
+*******************************************************************************************/
+INTEGER TxOK,Firstobject, ValueRequested,Sending;
+STRING tempTX[29], commandString[10000],CommandToBeSend[1000];       
+
+INTEGER RxOK,BufferSize,PollAllLock;                               
+STRING tempString[56];                                 
+
+INTEGER NumberOfUsedObjects;
+INTEGER ActiveOjbects[MAXOBJECTS][2],OjbectTypes[MAXOBJECTS][2];
+
+INTEGER RX_FoundObject;
+STRING 	Trash[20];   
+Integer RX_numberOfItems,RX_i,RX_j,RX_Offset,RX_objectNumber,RX_dataLength,RX_marker1,RX_BufferDataLength,RX_start, RX_length;
+String RX_temp[500],RX_data[16],RX_response[100],RX_Received[2000];
+
+/*******************************************************************************************
+  Functions
+  (Uncomment and declare additional event handlers as needed)
+*******************************************************************************************/
+/*
+Function show(STRING str)
+{
+	String temp[255];
+	while (len(str) > 100)
+	{
+		temp = removeByLength(100, str);
+		makestring(Debug,"%s", temp);
+	}                                         
+	makestring(Debug,"%s", str);
+} */
+
+
+Function Send()
+{
+	INTEGER length, marker1, type;
+	String temp[50];
+	marker1 = find("\xF0",CommandString);
+ 	if(marker1)
+ 	{
+ 		if(marker1 > 1)
+ 		{
+ 			temp = removeByLength(marker1-1,CommandString);
+ 			temp = "";
+ 		}
+ 	
+	 	type = Byte(CommandString,2);
+	 	Switch(type)
+	 	{
+	 		case(0x06):
+	 		{
+	 			length = Byte(CommandString,6)mod 16;
+				if(length>0)
+				{
+	 				temp = RemoveByLength(length+6,CommandString);
+				}
+				else
+				{
+					length = (byte(CommandString,4)*2)+4;
+					temp = RemoveByLength(length,CommandString);
+				}
+	 			Tx$ = temp;
+	 		}
+	 		case(0x01):
+	 		{
+	 		    temp = RemoveByLength(4,CommandString);
+	 			Tx$ = temp;
+	 		}
+	 		case(0x03):
+	 		{
+	 		    temp = RemoveByLength(4,CommandString);
+	 			Tx$ = temp;
+	 		}
+	 		case(0x05):
+	 		{
+	 		    temp = RemoveByLength(4,CommandString);
+	 			Tx$ = temp;
+	 		}
+	 		default: 
+	 		{
+	 		}
+	 			 	
+	 	}  
+	 	wait(500, WaitForResponse)
+		{            
+			Print("\nEIB timeout"); 
+			sending = 0;
+			CommandString = "";
+			clearbuffer(Rx$);
+			RxOK = 1;		
+		}
+	}
+	else
+	{
+		commandString = "";
+	}
+}
+
+FUNCTION ProcessErrorMessage(STRING temp)
+{
+	 if(Byte(temp,5) = 0x01)
+	 {
+	   	Trace("ERROR! Object %u: Internal error",Byte(temp,3));
+	 }
+	 else if(Byte(temp,5) = 0x02)
+	 {
+	   	Trace("ERROR! Object %u: No item found",Byte(temp,3));
+	 }else if(Byte(temp,5) = 0x03)
+	 {
+	   	Trace("ERROR! Object %u: Buffer too small",Byte(temp,3));
+	 }else if(Byte(temp,5) = 0x04)
+	 {
+	   	Trace("ERROR! Object %u: Item is not writeable",Byte(temp,3));
+	 }else if(Byte(temp,5) = 0x05)
+	 {
+	   	Trace("ERROR! Object %u: Service is not supported",Byte(temp,3)); 
+	 }else if(Byte(temp,5) = 0x06)
+	 {
+	   	Trace("ERROR! Object %u: Bad service parameter",Byte(temp,3));
+	 }else if(Byte(temp,5) = 0x07)
+	 {
+	   	Trace("ERROR! Object %u: Wrong datapoint ID",Byte(temp,3));
+	 }else if(Byte(temp,5) = 0x08)
+	 {
+	   	Trace("ERROR! Object %u: Bad datapoint command",Byte(temp,3));
+	 }else if(Byte(temp,5) = 0x09)
+	 {
+	   	Trace("ERROR! Object %u: Bad length of the datapoint value",Byte(temp,3));
+	 }else if(Byte(temp,5) = 0x0A)
+	 {
+	   	Trace("ERROR! Object %u: Message inconsistent ",Byte(temp,3));
+	 }
+}
+
+FUNCTION Update_Data_Points(Integer Start, Integer Number)
+{
+	INTEGER j,length,ReadyToSend,ObjectsInCommand,BadObject, LastObject;
+	
+/*	delay(100);
+	MakeString(0,"START POLL ALL ROUTINE\n");
+	MakeString(0,"START PRINTOUT\n");
+	delay(100);
+	for(j = 1 to 250)
+	{
+	 	MakeString(0,"ObjectTypes %u : %u size: %u\n",j,OjbectTypes[j][1],OjbectTypes[j][2]);
+	}
+	delay(100);
+	for(j = 1 to NumberOfUsedObjects)
+  	{
+  		MakeString(0,"ActiveObjects [%u] [%u]\n",ActiveOjbects[j][1],ActiveOjbects[j][2]);			 	
+  	}
+	MakeString(0,"END PRINTOUT\n");
+	delay(100);
+*/	
+	j=Start;
+	LastObject = j + Number -1;
+	ReadyToSend = 0;
+	length = 4;
+	ObjectsInCommand = 0;
+	BadObject = 0;
+	//MakeString(0,"START CREATING COMMANDS, START: %u, NUMBER OF OBJECTS: %u\n",j,LastObject);			
+	while(j <= LastObject && !ReadyToSend)
+	{
+		//MakeString(0,"CHECK OBJECTTYPES: Object: %u, Active: %u, Size: %u\n",j,OjbectTypes[j][1],OjbectTypes[j][2]);
+		if(OjbectTypes[j][1] && ActiveOjbects[j][2])
+		{			
+			if(length + 2 + OjbectTypes[j][2] <= BufferSize-3)
+		 	{
+		 		length = length + 2 + OjbectTypes[j][2];
+	            ObjectsInCommand = ObjectsInCommand + 1;
+	            //MakeString(0,"ADDING OBJECT: Cmd length: %u, Nmb of objects: %u\n",length,ObjectsInCommand);
+		 	}
+		 	else
+		 	{
+		 	 	ReadyToSend = 1;
+		 	 	//MakeString(0,"OBJECT NOT ADDED,CMD READY TO SEND\n"); 	
+		 	}
+		}
+		else
+		{
+		     BadObject = 1;
+		     //MakeString(0,"BAD OBJECT FOUND\n");
+		     
+		}	 	
+		if(ReadyToSend)
+		{
+		    //MakeString(0,"START READY TO SEND BRANCH\n");
+		    if(ObjectsInCommand)
+		    {
+		    	//MakeString(0,"READY TO SEND BRANCH, OBJECTS IN CMD: %u\n",ObjectsInCommand);
+		    	CommandString = CommandString + "\xF0\x05" + chr(Start) + chr(ObjectsInCommand);
+		    }
+			Start = j; 
+			ReadyToSend = 0;
+			length = 4;
+			ObjectsInCommand = 0;
+		}
+		else if(BadObject)
+		{
+		    //MakeString(0,"START BADOBJECT BRANCH\n");
+		    if(ObjectsInCommand)
+		    {
+		    	//MakeString(0,"BADOBJECT BRANCH, OBJECTS IN CMD: %u\n",ObjectsInCommand);
+		    	CommandString = CommandString + "\xF0\x05" + chr(Start) + chr(ObjectsInCommand);   	
+		    }
+		    j = j +1;
+		    Start = j;
+			length = 4;
+			ObjectsInCommand = 0;
+			BadObject = 0;		    
+		}
+		else
+		{
+		 	//MakeString(0,"NORMAL EXECUTION, AUGMENT J\n");
+		 	j = j+1;
+		}
+			
+	}
+	//MakeString(0,"IF ANY OBJECTS LEFT IN CMD, SEND FINAL CMD, nmb of obj: %u\n",ObjectsInCommand);  
+	if(ObjectsInCommand)
+    {
+    	CommandString = CommandString + "\xF0\x05" + chr(Start) + chr(ObjectsInCommand);
+    }
+	if(!sending)
+	{
+	 	 //MakeString(0,"CALL SEND METHOD\n");
+	 	 send();
+	}
+	//MakeString(0,"END POLL ALL ROUTINE\n");	
+}
+
+FUNCTION Update_Data_Points_From_Bus(Integer Start, Integer Number)
+{
+	INTEGER j,length,ReadyToSend,ObjectsInCommand,BadObject, LastObject,end,i;
+	String temp[260];
+	
+/*	delay(100);
+	MakeString(0,"START POLL ALL ROUTINE\n");
+	MakeString(0,"START PRINTOUT\n");
+	delay(100);
+	for(j = 1 to 250)
+	{
+	 	MakeString(0,"ObjectTypes %u : %u size: %u\n",j,OjbectTypes[j][1],OjbectTypes[j][2]);
+	}
+	delay(100);
+	for(j = 1 to NumberOfUsedObjects)
+  	{
+  		MakeString(0,"ActiveObjects [%u] [%u]\n",ActiveOjbects[j][1],ActiveOjbects[j][2]);			 	
+  	}
+	MakeString(0,"END PRINTOUT\n");
+	delay(100);
+*/	
+	j=Start;
+	LastObject = j + Number -1;
+	ReadyToSend = 0;
+	length = 4;
+	ObjectsInCommand = 0;
+	BadObject = 0;
+	//MakeString(0,"START CREATING COMMANDS, START: %u, NUMBER OF OBJECTS: %u\n",j,LastObject);			
+	while(j <= LastObject && !ReadyToSend)
+	{
+		//MakeString(0,"CHECK OBJECTTYPES: Object: %u, Active: %u, Size: %u\n",j,OjbectTypes[j][1],OjbectTypes[j][2]);
+		if(OjbectTypes[j][1] && ActiveOjbects[j][2])
+		{			
+			if(length + 2 <= BufferSize-3)
+		 	{
+		 		length = length + 2;
+	            ObjectsInCommand = ObjectsInCommand + 1;
+	            //MakeString(0,"ADDING OBJECT: Cmd length: %u, Nmb of objects: %u\n",length,ObjectsInCommand);
+		 	}
+		 	else
+		 	{
+		 	 	ReadyToSend = 1;
+		 	 	//MakeString(0,"OBJECT NOT ADDED,CMD READY TO SEND\n"); 	
+		 	}
+		}
+		else
+		{
+		     BadObject = 1;
+		     //MakeString(0,"BAD OBJECT FOUND\n");
+		     
+		}	 	
+		if(ReadyToSend)
+		{
+		    //MakeString(0,"START READY TO SEND BRANCH\n");
+		    if(ObjectsInCommand)
+		    {
+		    	//MakeString(0,"READY TO SEND BRANCH, OBJECTS IN CMD: %u\n",ObjectsInCommand);
+		    	temp = "\xF0\x06" + chr(Start) + chr(ObjectsInCommand);
+				end = start +ObjectsInCommand-1;
+				trace("1 Start: %u, End: %u\n",start,end);
+				for(i = start to end)
+				{
+                	temp = temp + chr(i) + "\x40";
+				}
+				CommandString = CommandString + temp;
+		    }
+			Start = j; 
+			ReadyToSend = 0;
+			length = 4;
+			ObjectsInCommand = 0;
+		}
+		else if(BadObject)
+		{
+		    //MakeString(0,"START BADOBJECT BRANCH\n");
+		    if(ObjectsInCommand)
+		    {
+		    	//MakeString(0,"BADOBJECT BRANCH, OBJECTS IN CMD: %u\n",ObjectsInCommand);
+		    	temp = "\xF0\x06" + chr(Start) + chr(ObjectsInCommand);
+				end = start +ObjectsInCommand-1;
+				//makestring(0,"1 Start: %u, End: %u\n",start,end);
+				for(i = start to end)
+				{
+                	temp = temp + chr(i) + "\x40";
+					//makestring(0,"i=%u,Expanding temp: %s\n",i,temp);
+				}
+				CommandString = CommandString + temp;   	
+		    }
+		    j = j +1;
+		    Start = j;
+			length = 4;
+			ObjectsInCommand = 0;
+			BadObject = 0;		    
+		}
+		else
+		{
+		 	//MakeString(0,"NORMAL EXECUTION, AUGMENT J\n");
+		 	j = j+1;
+		}
+			
+	}
+	//MakeString(0,"IF ANY OBJECTS LEFT IN CMD, SEND FINAL CMD, nmb of obj: %u\n",ObjectsInCommand);  
+	if(ObjectsInCommand)
+    {
+    	temp = "\xF0\x06" + chr(Start) + chr(ObjectsInCommand);
+		end = start +ObjectsInCommand-1;
+		//makestring(0,"2 Start: %u, End: %u\n",start,end);
+		for(i = start to end)
+		{
+              	temp = temp + chr(i) + "\x40";
+		}
+		CommandString = CommandString + temp;
+    }
+	if(!sending)
+	{
+	 	 //MakeString(0,"CALL SEND METHOD\n");
+	 	 send();
+	}
+	//MakeString(0,"END POLL ALL ROUTINE\n");	
+}
+
+
+Function Startup_System()
+{
+	Integer k,l,j;
+	l = 1;
+	for (k = 1 to MAXOBJECTS)
+	{                      
+		//if (Object_ID$[k])
+		//{
+			ActiveOjbects[k][1] = k;
+			ActiveOjbects[k][2] = Object_ID$[k];
+			//l = l +1;		
+		//}
+	}
+	processlogic();
+	NumberOfUsedObjects = MAXOBJECTS; //l-1;
+	
+	CommandString = CommandString + "\xF0\x01\x0B\x01";
+	CommandString = CommandString + "\xF0\x03\x01\x54";
+	CommandString = CommandString + "\xF0\x03\x55\x53";
+	CommandString = CommandString + "\xF0\x03\xA8\x53";
+	if(!sending)
+ 	{
+ 	 	send();
+ 	} 
+}
+
+/*******************************************************************************************
+  Event Handlers
+  (Uncomment and declare additional event handlers as needed)
+*******************************************************************************************/
+
+PUSH Update_Data_Points_Values_From_Bus
+{
+	/*if(!valueRequested)
+	{
+		ValueRequested = 1;   */
+		Update_Data_Points_From_Bus(1, MAXOBJECTS);
+	/*	ValueRequested = 0;		
+	}*/		
+}
+
+
+
+PUSH Startup_Gateway
+{
+	Startup_System(); 	
+}
+
+PUSH Update_Data_Points_Values
+{
+	/*if(!valueRequested)
+	{
+		ValueRequested = 1;   */
+		Update_Data_Points(1, MAXOBJECTS);
+	/*	ValueRequested = 0;		
+	}*/		
+}
+
+PUSH Poll_Object
+{
+ 	Integer index;
+ 	INTEGER i, j; 
+ 	 	
+ 	index = GetLastModifiedArrayIndex();
+ 	
+ 	if(Object_ID$[index] = 0)
+ 	{
+ 	    Trace("GROUP ADDRESS NOT USED");
+ 	}
+ 	else
+ 	{ 
+		/*if(!valueRequested)
+		{
+			ValueRequested = 1; */
+			Update_Data_Points(index, 1);
+			/*ValueRequested = 0;		
+		} */
+	}
+			
+}
+
+PUSH Poll_Object_From_Bus
+{
+ 	Integer index;
+ 	INTEGER i, j; 
+ 	 	
+ 	index = GetLastModifiedArrayIndex();
+ 	
+ 	if(Object_ID$[index] = 0)
+ 	{
+ 	    Trace("GROUP ADDRESS NOT USED");
+ 	}
+ 	else
+ 	{ 
+		/*if(!valueRequested)
+		{
+			ValueRequested = 1; */
+			Update_Data_Points_From_Bus(index, 1);
+			/*ValueRequested = 0;		
+		} */
+	}
+			
+}
+
+
+
+CHANGE Command$
+{	
+	commandString = commandString + Command$;
+ 	if(!sending)
+ 	{    
+ 		sending = 1;
+ 	 	send();
+ 	}
+}    
+
+
+CHANGE Rx$
+{
+	RX_Received = RX_Received + Rx$;
+	clearbuffer(Rx$);
+	//MakeString(0,"START RX EVENT\n");
+	if (RxOK)
+	{
+		//MakeString(0,"RX EVENT, PASSED GUARD, START EXECUTING\n");
+		RxOK = 0;
+		while(len(RX_Received) >= 2)         // find \xF0
+		{
+		 	if(Byte(RX_Received,1) = 0xF0)
+		 	{
+		 	 	Switch(Byte(RX_Received,2))
+		 	 	{
+		 	 		Case(0x86):     //SetDatapointValue response
+		 	 		{        
+		 	 		   RX_length = 5;                       
+		 	 		   if (len(RX_Received) >= RX_length)
+		 	 		   {	
+			 	 		   cancelWait(WaitForResponse); 			
+	 	 			  	   RX_temp = RemoveByLength(RX_length,RX_Received);
+			 	 		   if(Byte(RX_temp,5) = 0x00)// && (Byte(RX_temp,4)>0))
+			 	 		   {
+			 	 		   		RX_objectNumber = Byte(RX_temp,3);		 	 			  		
+		 	 			  		RX_FoundObject = 0;
+                                RX_j = 1;
+		 	 			  		while(RX_j <= NumberOfUsedObjects && !RX_FoundObject)
+			 	 			  	{
+			 	 			  		if(ActiveOjbects[RX_j][2]= RX_objectNumber)
+			 	 			  		{
+			 	 			  		    MakeString(RX_response,"CHANGE OK\x0D");
+			 	 			  			Feedback$[ActiveOjbects[RX_j][1]] = RX_response;
+			 	 			  			RX_FoundObject = 1;
+			 	 			  		}
+			 	 			  		RX_j = RX_j + 1;			 	
+			 	 			  	}
+			 	 			  	
+			 	 			  	if(!RX_FoundObject)
+	 	 			  			{
+	 	 			  		    	Trash = RemoveByLength(RX_dataLength + 2,RX_temp);
+                                }		 	 		   		
+			 	 		   }
+			 	 		   else
+			 	 		   {
+			 	 		   		ProcessErrorMessage(RX_temp);
+			 	 		   }      
+			 	 		   RX_temp = "";
+			 	 		   
+			 	 		   if(len(CommandString))// && !valueRequested)
+		 				   {
+		 	 					send();
+		 				   }
+		 				   else
+		 				   {
+		 				    	Sending = 0;
+		 				   } 
+		 				}
+		 	 		}
+		 	 		Case(0xC1):   //Datapoint value update
+		 	 		{  						            
+		 	 			//MakeString(0,"START C1 ROUTINE\n");
+		 	 			if (len(RX_Received) >= 4)
+		 	 			{                
+		 	 				RX_temp = RemoveByLength(4,RX_Received);
+			 	 			RX_numberOfItems = Byte(RX_temp,4);
+			 	 			RX_temp = "";
+			 	 			RX_i = 1;
+			 	 			//MakesTring(0,"C1: Main while loop, numberofitems: %u\n", RX_numberOfItems);
+			 	 			while(RX_i <= RX_numberOfItems)
+			 	 			{
+		 	 					if (len(RX_Received) >= 2)
+			 	 				{                              				 	 			  	
+				 	 			  	RX_dataLength = Byte(RX_Received,2)mod 16;
+				 	 			  	//MakesTring(0,"C1: Main while loop, dataLength: %u\n", RX_dataLength);
+				 	 			  	if(len(RX_Received) >= RX_dataLength+2)
+				 	 			  	{
+					 	 			  	RX_temp = RemoveByLength(RX_dataLength+2,RX_Received);
+					 	 			  	RX_objectNumber = Byte(RX_temp,1);
+					 	 			  	RX_data = mid(RX_temp,3,RX_dataLength);
+					 	 			  	RX_FoundObject = 0;
+                                        RX_j = 1;
+                                        //MakesTring(0,"C1: Inner while loop, NumberOfObjects: %u\n", NumberOfUsedObjects);
+                                        //MakesTring(0,"C1: Inner while loop, RXObjectNumber: %u\n", RX_objectNumber);
+					 	 			  	while(RX_j <= NumberOfUsedObjects && !RX_FoundObject)
+					 	 			  	{
+					 	 			  		//MakesTring(0,"C1: Inner while loop, ActiveObjects[1]: %u, ActiveObjects[2]: %u\n", RX_j,ActiveOjbects[RX_j][2]);
+					 	 			  		if(ActiveOjbects[RX_j][2]= RX_objectNumber)
+					 	 			  		{
+					 	 			  		    MakeString(RX_response,"CHANGE STATE:%s",RX_data);
+					 	 			  			Feedback$[ActiveOjbects[RX_j][1]] = RX_response;
+					 	 			  			RX_FoundObject = 1;
+					 	 			  		}
+					 	 			  		RX_j = RX_j + 1;			 	
+					 	 			  	}
+					 	 			  	
+					 	 			  	if(!RX_FoundObject)
+			 	 			  			{
+			 	 			  		    	//MakesTring(0,"C1: Object Not found, Deleting\n");
+			 	 			  		    	Trash = RemoveByLength(RX_dataLength + 2,RX_temp);
+                                        }			
+						
+						 	 			RX_temp = "";
+						 	 			RX_i = RX_i + 1;
+						 	 		}
+						 	 		
+						 	 		else
+						 	 		{
+						 	 		 	delay(1);
+						 	 		}				 	 		    				 	 		
+				 				}
+				 				else
+				 				{
+				 				 	delay(1);
+				 				}
+				 			}
+		 	 			}
+		 	 			//MakeString(0,"END C1 ROUTINE\n");   	
+		 	 		}
+		 	 	    Case(0x85):  //GetDatapointValue response
+		 	 	    {
+		 	 			//MakeString(0,"START 85 ROUTINE\n");
+		 	 			if (len(RX_Received) >= 5)
+		 	 			{                
+		 	        		cancelWait(WaitForResponse);
+			 			  	if(Byte(RX_Received,4) = 0)
+			 			  	{
+			 			      	RX_temp = RemoveByLength(5,RX_Received);
+			 			      	ProcessErrorMessage(RX_temp);
+			 			      	RX_temp = "";
+			 			  	}
+			 			  	else
+			 			  	{
+			 	 			  	RX_temp = RemoveByLength(4,RX_Received);
+			 	 			  	RX_numberOfItems = Byte(RX_temp,4);
+			 	 			  	RX_temp = "";
+			 	 			  	RX_i = 1;
+			 	 			  	//MakesTring(0,"85: Main while loop, numberofitems: %u\n", RX_numberOfItems);
+			 	 			  	while(RX_i <= RX_numberOfItems)
+			 	 			  	{ 
+			 	 			  		//MakesTring(0,"85: Innner while loop, RX_i: %u, RX_NumberOfItems: %u\n", RX_i,RX_numberOfItems);
+			 	 			  		if(len(RX_Received) >= 2)
+			 	 			  		{
+				 	 			  		RX_objectNumber = Byte(RX_Received,1);
+				 	 			  		RX_dataLength = Byte(RX_Received,2)mod 16;
+				 	 			  		//MakesTring(0,"85: Innner while loop, dataLength: %u\n", RX_dataLength);
+				 	 			  		if(len(RX_Received) >= RX_dataLength+2)
+				 	 			  		{
+					 	 			  		RX_temp = RemoveByLength(RX_dataLength+2,RX_Received);
+					 	 			  		RX_data = mid(RX_temp,3,RX_dataLength);					 	 			  						 	 			  		
+					 	 			  		RX_FoundObject = 0;
+			                                RX_j = 1;
+					 	 			  		//MakesTring(0,"85: Inner while loop, NumberOfObjects: %u\n", NumberOfUsedObjects);
+                                        	//MakesTring(0,"85: Inner while loop, RXObjectNumber: %u\n", RX_objectNumber);
+					 	 			  		while(RX_j <= NumberOfUsedObjects && !RX_FoundObject)
+						 	 			  	{
+						 	 			  		//MakesTring(0,"85: Inner while loop, ActiveObjects[1]: %u, ActiveObjects[2]: %u\n", RX_j,ActiveOjbects[RX_j][2]);
+					 	 			  			if(ActiveOjbects[RX_j][2]= RX_objectNumber)
+						 	 			  		{
+						 	 			  		    MakeString(RX_response,"CHANGE STATE:%s",RX_data);
+						 	 			  			Feedback$[ActiveOjbects[RX_j][1]] = RX_response;
+						 	 			  			RX_FoundObject = 1;
+						 	 			  		}
+						 	 			  		RX_j = RX_j + 1;			 	
+						 	 			  	}
+						 	 			  	
+						 	 			  	if(!RX_FoundObject)
+				 	 			  			{
+				 	 			  		    	//MakesTring(0,"85: Object Not found, Deleting\n");
+				 	 			  		    	Trash = RemoveByLength(RX_dataLength + 2,RX_temp);
+			                                }
+					 	 			  		
+					 	 			  		RX_temp = ""; 
+					 	 			  		RX_i = RX_i + 1;
+					 	 			  	}
+					 	 			  	else
+					 	 			  	{
+					 	 			  	 	delay(1);
+					 	 			  	}
+				 	 			  	}
+				 	 			  	else
+				 	 			  	{
+				 	 			  	 	delay(1);
+				 	 			  	}
+				 	 			  				
+			 	 			  	}
+			 	 			  	//RX_temp = RemoveByLength(RX_Offset-1,RX_Received);
+			 	 		   	  	RX_temp = "";
+			 	 		  	}
+		 	 		   	  	if(len(CommandString))// && !valueRequested)
+		 				  	{
+		 	 			  		//MakesTring(0,"85: CALL SEND\n");
+		 	 			  		send();
+		 				  	}
+		 				  	else
+		 				  	{
+		 				   		Sending = 0;
+		 				  	}
+				 		}
+				 		//MakeString(0,"END 85 ROUTINE\n"); 	
+		 	 	    }
+		 	 	    Case(0x81):  //GetServerItem response
+		 	 	    {
+		 	 	    	if(len(RX_Received) >= 5)
+		 	 	    	{
+		 	 				cancelWait(WaitForResponse);
+		 	 			 	if(Byte(RX_Received,4) = 0)
+		 	 			  	{
+		 	 			    	RX_temp = RemoveByLength(5,RX_Received);
+		 	 			    	ProcessErrorMessage(RX_temp);
+		 	 			    	RX_temp = "";
+		 	 			  	}
+		 	 			  	else if(Byte(RX_Received,3) = 0x0B)
+		 	 			  	{
+		 	 			   	  	RX_length = 8;
+		 	 			   	  	RX_temp = RemoveByLength(RX_length,RX_Received);
+		 	 			   	  	RX_BufferDataLength = Byte(RX_temp,6);
+		 	 			   	  	BufferSize = (Byte(RX_temp,7)<<8)+Byte(RX_temp,8);
+		 	 			   	  	RX_temp = "";	 	
+		 	 			  	}
+		 	 			  	
+		 	 			  	if(len(CommandString))//&& !valueRequested)
+		 				  	{
+		 	 					send();
+		 				  	}
+		 				  	else
+		 				  	{
+		 				    	Sending = 0;
+		 				  	}
+		 				}	  	
+		 	 	    }
+		 	 	    Case(0x83):   //GetDatapointDescription response
+		 	 	    {
+		 	 			if(len(RX_Received) >= 5)
+		 	 			{		
+		 	 				cancelWait(WaitForResponse);
+		 	 			  	if(Byte(RX_Received,4) = 0)
+		 	 			  	{
+		 	 			    	RX_temp = RemoveByLength(5,RX_Received);
+		 	 			    	ProcessErrorMessage(RX_temp);
+		 	 			    	RX_temp = "";
+		 	 			  	}
+		 	 			  	else
+		 	 			  	{
+		 	 			   	  	RX_temp = RemoveByLength(4,RX_Received);
+		 	 			   	  	RX_start = Byte(RX_temp,3);
+			 	 			  	RX_numberOfItems = Byte(RX_temp,4);
+			 	 			  	RX_temp = "";
+		 	 			   	  	
+			 	 			  	
+			 	 			  	RX_i = 1;
+			 	 			  	while(RX_i <= RX_numberOfItems)
+			 	 			  	{
+			 	 			  		if(len(RX_Received) >= 2)
+		 	 			  			{
+				 	 			  		RX_temp = RemoveByLength(2,RX_Received);
+				 	 			  		if((Byte(RX_temp,2)& 4) = 4)
+				 	 			  		{
+				 	 			  			OjbectTypes[RX_start][1] = 1;
+				 	 			  			Switch(Byte(RX_temp,1))
+				 	 			  			{
+				 	 			  			 	case(0):
+				 	 			  			 	{
+				 	 			  			 	     OjbectTypes[RX_start][2] = 1;
+				 	 			  			 	}
+				 	 			  			 	case(3):
+				 	 			  			 	{
+				 	 			  			 	     OjbectTypes[RX_start][2] = 1;
+				 	 			  			 	}
+				 	 			  			 	case(7):
+				 	 			  			 	{
+				 	 			  			 	     OjbectTypes[RX_start][2] = 1;
+				 	 			  			 	}
+				 	 			  			 	case(8):
+				 	 			  			 	{
+				 	 			  			 	     OjbectTypes[RX_start][2] = 2;
+				 	 			  			 	}
+				 	 			  			 	case(9):
+				 	 			  			 	{
+				 	 			  			 	     OjbectTypes[RX_start][2] = 3;
+				 	 			  			 	}
+				 	 			  			 	case(10):
+				 	 			  			 	{
+				 	 			  			 	     OjbectTypes[RX_start][2] = 4;             //TO DO CHECK 4BYTE OBJECT
+				 	 			  			 	}
+				 	 			  			 	case(14):
+				 	 			  			 	{
+				 	 			  			 	     OjbectTypes[RX_start][2] = 14;
+				 	 			  			 	} 
+				 	 			  			 	default:
+				 	 			  			 	{
+				 	 			  			 	 	 OjbectTypes[RX_start][2] = 0;
+				 	 			  			 	}
+				 	 			  			}		 	
+				 	 			  		}
+				 	 			  		else
+				 	 			  		{
+				 	 			  		 	OjbectTypes[RX_start][1] = 0;
+				 	 			  		}
+				 	 			  		RX_start = RX_start + 1;
+				 	 			  		RX_temp = "";
+				 	 			  		RX_i = RX_i + 1;
+				 	 			  	}
+				 	 			  	else
+				 	 			  	{
+				 	 			  		delay(1);
+				 	 			  	}			
+			 	 			  	}
+			 	 		   	  	RX_temp = "";
+			 	 			
+		 	 			  	}
+		 	 			  	if(len(CommandString))// && !valueRequested)
+		 				  	{	
+		 	 					send();
+		 				  	}
+		 				  	else
+		 				  	{
+		 				    	Sending = 0;
+		 				  	}
+		 				}		  
+		 	 	    }
+		 	 	    Default:
+		 	 	    {
+		 	 	   		RX_temp = RemoveByLength(1,RX_Received);
+		 	 	   		RX_temp = "";
+		 	 	   		RX_marker1 = find("\xF0",RX_Received);
+		 	 	   		if(RX_marker1)
+		 	 	   		{
+		 	 	   		 	RX_temp = removeByLength(RX_marker1 - 1,RX_Received);
+		 	 	   		 	RX_temp = "";
+		 	 	   		}
+		 	 	   		else
+		 	 	   		{
+		 	 	   		 	clearbuffer(RX_Received);
+		 	 	   		} 
+		 	 	   		  	
+		 	 	    }
+		 	 	}  
+		 	}
+		 	else
+		 	{
+		 		RX_marker1 = find("\xF0",RX_Received);
+ 	 	   		if(RX_marker1)
+ 	 	   		{
+ 	 	   		 	RX_temp = removeByLength(RX_marker1 - 1,RX_Received);
+ 	 	   		 	RX_temp = "";
+ 	 	   		}
+ 	 	   		else
+ 	 	   		{
+ 	 	   		 	clearbuffer(RX_Received);
+  	 	   		}
+		 	}
+		}		
+		RxOK = 1;
+		//MakeString(0,"RX EVENT, PASSED GUARD, STOP EXECUTING\n");
+	}
+	//MakeString(0,"END RX EVENT\n");	
+}
+
+/*******************************************************************************************
+  Main()
+  Uncomment and place one-time startup code here
+  (This code will get called when the system starts up)
+*******************************************************************************************/
+
+Function Main()
+{                
+	INTEGER k,l;
+    Firstobject=0;
+    BufferSize = 0;
+    ValueRequested = 0;
+    RX_FoundObject = 0;
+    Sending = 0;
+    PollAllLock = 0;
+	TxOK = 1;
+	RxOK = 1;
+	CommandString = ""; 
+	l = 1;
+	NumberOfUsedObjects = 0;
+	WaitForInitializationComplete();                                                     
+}          
+
+
+
+
+
+
+
+
+
+
+
